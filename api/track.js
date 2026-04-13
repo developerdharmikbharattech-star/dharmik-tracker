@@ -1,10 +1,9 @@
 // File: api/track.js
-// Deploy this in your Vercel project root under /api/track.js
-// It will be accessible at: https://your-vercel-domain.vercel.app/api/track?order_id=1042
+// DEBUG VERSION — shows detailed errors to help troubleshoot
+// Once working, replace with the production version
 
 export default async function handler(req, res) {
-  // Enable CORS for your Shopify domain
-  res.setHeader("Access-Control-Allow-Origin", "*"); // Replace * with your Shopify domain in production
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -18,8 +17,22 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Order ID is required" });
   }
 
+  // Debug: check if env variables exist
+  const hasEmail = !!process.env.SHIPROCKET_EMAIL;
+  const hasPassword = !!process.env.SHIPROCKET_PASSWORD;
+
+  if (!hasEmail || !hasPassword) {
+    return res.status(500).json({
+      error: "Missing environment variables",
+      debug: {
+        SHIPROCKET_EMAIL_set: hasEmail,
+        SHIPROCKET_PASSWORD_set: hasPassword,
+      },
+    });
+  }
+
   try {
-    // Step 1: Get Shiprocket auth token
+    // Step 1: Authenticate
     const authResponse = await fetch("https://apiv2.shiprocket.in/v1/external/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -29,40 +42,88 @@ export default async function handler(req, res) {
       }),
     });
 
+    const authText = await authResponse.text();
+
     if (!authResponse.ok) {
-      throw new Error("Shiprocket authentication failed");
+      return res.status(500).json({
+        error: "Shiprocket authentication failed",
+        debug: {
+          step: "auth",
+          status: authResponse.status,
+          response: authText.substring(0, 500),
+        },
+      });
     }
 
-    const authData = await authResponse.json();
+    let authData;
+    try {
+      authData = JSON.parse(authText);
+    } catch (e) {
+      return res.status(500).json({
+        error: "Could not parse auth response",
+        debug: { step: "auth_parse", response: authText.substring(0, 500) },
+      });
+    }
+
     const token = authData.token;
 
-    // Step 2: Search for the order using Shopify order number
-    // Shiprocket's order search endpoint lets us find by channel_order_id (Shopify order number)
-    const orderResponse = await fetch(
-      `https://apiv2.shiprocket.in/v1/external/orders?search=${order_id}&page=1&per_page=1`,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-
-    if (!orderResponse.ok) {
-      throw new Error("Failed to fetch order from Shiprocket");
+    if (!token) {
+      return res.status(500).json({
+        error: "No token received from Shiprocket",
+        debug: { step: "auth_token", response: authData },
+      });
     }
 
-    const orderData = await orderResponse.json();
+    // Step 2: Search for order
+    const orderUrl = `https://apiv2.shiprocket.in/v1/external/orders?search=${encodeURIComponent(order_id)}&page=1&per_page=1`;
+    const orderResponse = await fetch(orderUrl, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
 
-    // Check if order was found
+    const orderText = await orderResponse.text();
+
+    if (!orderResponse.ok) {
+      return res.status(500).json({
+        error: "Failed to fetch order from Shiprocket",
+        debug: {
+          step: "order_search",
+          url: orderUrl,
+          status: orderResponse.status,
+          response: orderText.substring(0, 500),
+        },
+      });
+    }
+
+    let orderData;
+    try {
+      orderData = JSON.parse(orderText);
+    } catch (e) {
+      return res.status(500).json({
+        error: "Could not parse order response",
+        debug: { step: "order_parse", response: orderText.substring(0, 500) },
+      });
+    }
+
+    // Check if order found
     if (!orderData.data || orderData.data.length === 0) {
-      return res.status(404).json({ error: "Order not found. Please check your order number." });
+      return res.status(404).json({
+        error: "Order not found. Please check your order number.",
+        debug: {
+          step: "order_not_found",
+          search_term: order_id,
+          raw_response_keys: Object.keys(orderData),
+          total_count: orderData.meta?.pagination?.total || 0,
+        },
+      });
     }
 
     const order = orderData.data[0];
     const shipments = order.shipments;
 
-    // If no shipment yet (order not shipped)
+    // Not shipped yet
     if (!shipments || shipments.length === 0) {
       return res.status(200).json({
         order_id: order.channel_order_id,
@@ -75,7 +136,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Step 3: Get tracking data using AWB number
+    // Step 3: Get tracking
     const awb = shipments[0].awb;
     const courier = shipments[0].courier_name;
 
@@ -91,21 +152,38 @@ export default async function handler(req, res) {
       });
     }
 
-    const trackResponse = await fetch(
-      `https://apiv2.shiprocket.in/v1/external/courier/track/awb/${awb}`,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
+    const trackUrl = `https://apiv2.shiprocket.in/v1/external/courier/track/awb/${awb}`;
+    const trackResponse = await fetch(trackUrl, {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const trackText = await trackResponse.text();
 
     if (!trackResponse.ok) {
-      throw new Error("Failed to fetch tracking data");
+      return res.status(500).json({
+        error: "Failed to fetch tracking data",
+        debug: {
+          step: "tracking",
+          awb: awb,
+          status: trackResponse.status,
+          response: trackText.substring(0, 500),
+        },
+      });
     }
 
-    const trackData = await trackResponse.json();
+    let trackData;
+    try {
+      trackData = JSON.parse(trackText);
+    } catch (e) {
+      return res.status(500).json({
+        error: "Could not parse tracking response",
+        debug: { step: "tracking_parse", response: trackText.substring(0, 500) },
+      });
+    }
+
     const tracking = trackData.tracking_data || {};
 
     return res.status(200).json({
@@ -124,10 +202,15 @@ export default async function handler(req, res) {
       shipment_track_activities: tracking.shipment_track_activities || [],
       products: order.products || [],
     });
+
   } catch (error) {
-    console.error("Tracking error:", error);
     return res.status(500).json({
-      error: "Something went wrong while fetching tracking info. Please try again.",
+      error: "Unexpected error",
+      debug: {
+        step: "catch",
+        message: error.message,
+        name: error.name,
+      },
     });
   }
 }
