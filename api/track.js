@@ -22,6 +22,15 @@ export default async function handler(req, res) {
   }
   
   try {
+    // TEMPORARY DEBUG
+    if (req.query.debug === 'check') {
+      return res.status(200).json({
+        delhivery_token: process.env.DELHIVERY_API_TOKEN ? `${process.env.DELHIVERY_API_TOKEN.substring(0, 8)}...` : 'NOT SET',
+        delhivery_token_length: process.env.DELHIVERY_API_TOKEN?.length || 0,
+        shiprocket_email: process.env.SHIPROCKET_EMAIL || 'NOT SET',
+        shiprocket_password_set: !!process.env.SHIPROCKET_PASSWORD
+      });
+    }
     const { orderId, orderNumber, awb } = req.query;
     
     // Track by AWB (Waybill)
