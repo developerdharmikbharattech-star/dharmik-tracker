@@ -1,6 +1,6 @@
 /**
  * DHARMIK ORDER TRACKING API - DUAL COURIER (DELHIVERY + SHIPROCKET)
- * Supports tracking by Order ID and AWB for both couriers
+ * Tries Delhivery first, falls back to Shiprocket
  */
 
 let shiprocketToken = null;
@@ -46,19 +46,22 @@ export default async function handler(req, res) {
     
   } catch (error) {
     console.error('API Error:', error);
-    return res.status(500).json({ 
-      error: 'Something went wrong',
+    return res.status(404).json({ 
+      error: 'Tracking not found',
       message: error.message 
     });
   }
 }
 
-// Track by Order ID - Try both Delhivery and Shiprocket
+// ==================== TRACK BY ORDER ID ====================
 async function trackByOrderId(orderIdentifier) {
   const cleanOrderId = orderIdentifier.toString()
     .replace(/^#/, '')
     .replace(/^DHK/i, '')
     .trim();
+  
+  let delhiveryError = null;
+  let shiprocketError = null;
   
   // Try Delhivery first
   try {
@@ -67,7 +70,8 @@ async function trackByOrderId(orderIdentifier) {
       return formatDelhiveryResponse(delhiveryData);
     }
   } catch (err) {
-    console.log('Delhivery Order ID lookup failed, trying Shiprocket...');
+    delhiveryError = err.message;
+    console.log('Delhivery Order ID lookup failed:', err.message);
   }
   
   // Fallback to Shiprocket
@@ -75,13 +79,19 @@ async function trackByOrderId(orderIdentifier) {
     const shiprocketData = await trackShiprocketByOrderId(cleanOrderId);
     return shiprocketData;
   } catch (err) {
-    throw new Error('Order not found. Please check your order number.');
+    shiprocketError = err.message;
+    console.log('Shiprocket Order ID lookup failed:', err.message);
   }
+  
+  throw new Error(`Order not found. Please check your order number.`);
 }
 
-// Track by AWB - Try both Delhivery and Shiprocket
+// ==================== TRACK BY AWB ====================
 async function trackByAWB(awb) {
   const cleanAWB = awb.toString().trim();
+  
+  let delhiveryError = null;
+  let shiprocketError = null;
   
   // Try Delhivery first
   try {
@@ -90,7 +100,8 @@ async function trackByAWB(awb) {
       return formatDelhiveryResponse(delhiveryData);
     }
   } catch (err) {
-    console.log('Delhivery AWB lookup failed, trying Shiprocket...');
+    delhiveryError = err.message;
+    console.log('Delhivery AWB lookup failed:', err.message);
   }
   
   // Fallback to Shiprocket
@@ -98,8 +109,11 @@ async function trackByAWB(awb) {
     const shiprocketData = await trackShiprocketByAWB(cleanAWB);
     return shiprocketData;
   } catch (err) {
-    throw new Error('Tracking information not found');
+    shiprocketError = err.message;
+    console.log('Shiprocket AWB lookup failed:', err.message);
   }
+  
+  throw new Error('Tracking information not found');
 }
 
 // ==================== DELHIVERY API ====================
@@ -111,7 +125,6 @@ async function trackDelhiveryByOrderId(orderId) {
     throw new Error('Delhivery API token not configured');
   }
   
-  // Delhivery uses "ref_ids" parameter for Order ID tracking
   const response = await fetch(
     `https://track.delhivery.com/api/v1/packages/json/?ref_ids=${encodeURIComponent(orderId)}`,
     {
@@ -122,12 +135,11 @@ async function trackDelhiveryByOrderId(orderId) {
     }
   );
   
-  const data = await response.json();
-  
   if (!response.ok) {
-    throw new Error('Delhivery order tracking failed');
+    throw new Error(`Delhivery API returned ${response.status}`);
   }
   
+  const data = await response.json();
   return data;
 }
 
@@ -148,12 +160,11 @@ async function trackDelhiveryByAWB(awb) {
     }
   );
   
-  const data = await response.json();
-  
   if (!response.ok) {
-    throw new Error('Delhivery tracking failed');
+    throw new Error(`Delhivery API returned ${response.status}`);
   }
   
+  const data = await response.json();
   return data;
 }
 
@@ -166,7 +177,6 @@ function formatDelhiveryResponse(data) {
     return new Date(b.ScanDetail.ScanDateTime) - new Date(a.ScanDetail.ScanDateTime);
   });
   
-  // Format to match Shiprocket structure
   return [{
     tracking_data: {
       track_status: 1,
@@ -185,7 +195,7 @@ function formatDelhiveryResponse(data) {
         current_status: shipment.Status.Status,
         delivered_to: shipment.Shipment.DestinationArea,
         destination: shipment.Shipment.DestinationArea,
-        consignee_name: shipment.Shipment.Consignee.Name,
+        consignee_name: shipment.Shipment.Consignee?.Name || '',
         origin: shipment.Shipment.OriginArea,
         courier_agent_details: null,
         courier_name: 'Delhivery',
@@ -213,7 +223,6 @@ function formatDelhiveryResponse(data) {
   }];
 }
 
-// Map Delhivery status to Shiprocket-like status codes
 function getShiprocketStatusCode(status) {
   const statusUpper = status.toUpperCase();
   
@@ -225,7 +234,7 @@ function getShiprocketStatusCode(status) {
   if (statusUpper.includes('RTO')) return '9';
   if (statusUpper.includes('CANCELLED')) return '11';
   
-  return '6'; // Default to in-transit
+  return '6';
 }
 
 // ==================== SHIPROCKET API ====================
@@ -279,7 +288,6 @@ async function trackShiprocketByOrderId(orderId) {
     throw new Error('Order not found in Shiprocket');
   }
   
-  // Add courier source flag
   if (data[0] && data[0].tracking_data) {
     data[0].tracking_data.courier_source = 'shiprocket';
   }
@@ -306,7 +314,6 @@ async function trackShiprocketByAWB(awb) {
     throw new Error('AWB not found in Shiprocket');
   }
   
-  // Format to match expected structure
   return [{
     tracking_data: {
       ...data.tracking_data,
