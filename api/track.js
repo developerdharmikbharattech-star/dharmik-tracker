@@ -1,9 +1,9 @@
 /**
  * DHARMIK ORDER TRACKING API - DUAL COURIER (FINAL)
+ * Accepts: orderId, order_id, orderNumber, order_number, awb, awb_number
  * Logic:
  *   - Delhivery: Always send order ID with # prefix
  *   - Shiprocket: Always send order ID without # prefix
- *   - User can input with or without # — we normalize
  */
 
 let shiprocketToken = null;
@@ -64,15 +64,22 @@ export default async function handler(req, res) {
   }
   
   try {
-    const { orderId, orderNumber, awb } = req.query;
+    // Accept multiple parameter name variants for backward compatibility
+    const { 
+      orderId, orderNumber, order_id, order_number,
+      awb, awb_number, awb_code 
+    } = req.query;
     
-    if (awb) {
-      const tracking = await trackByAWB(awb);
+    const finalOrderId = orderId || orderNumber || order_id || order_number;
+    const finalAwb = awb || awb_number || awb_code;
+    
+    if (finalAwb) {
+      const tracking = await trackByAWB(finalAwb);
       return res.status(200).json(tracking);
     }
     
-    if (orderId || orderNumber) {
-      const tracking = await trackByOrderId(orderId || orderNumber);
+    if (finalOrderId) {
+      const tracking = await trackByOrderId(finalOrderId);
       return res.status(200).json(tracking);
     }
     
@@ -80,6 +87,7 @@ export default async function handler(req, res) {
       error: 'Missing parameters',
       usage: {
         byOrderId: '/api/track?orderId=21079',
+        byOrderIdAlt: '/api/track?order_id=21079',
         byAWB: '/api/track?awb=27802410024404'
       }
     });
